@@ -4,8 +4,8 @@
 # LICENSE: https://github.com/markus-perl/ffmpeg-build-script/blob/master/LICENSE
 
 PROGNAME=$(basename "$0")
-FFMPEG_VERSION=7.0
-SCRIPT_VERSION=1.52
+FFMPEG_VERSION=7.1
+SCRIPT_VERSION=1.54
 CWD=$(pwd)
 PACKAGES="$CWD/packages"
 WORKSPACE="$CWD/workspace"
@@ -13,7 +13,7 @@ CFLAGS="-I$WORKSPACE/include -Wno-int-conversion"
 LDFLAGS="-L$WORKSPACE/lib"
 LDEXEFLAGS=""
 EXTRALIBS="-ldl -lpthread -lm -lz"
-MACOS_M1=false
+MACOS_SILICON=false
 CONFIGURE_OPTIONS=()
 NONFREE_AND_GPL=false
 DISABLE_LV2=false
@@ -21,12 +21,35 @@ LATEST=false
 MANPAGES=1
 CURRENT_PACKAGE_VERSION=0
 
+
+command_exists() {
+  if ! [[ -x $(command -v "$1") ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
 # Check for Apple Silicon
 if [[ ("$(uname -m)" == "arm64") && ("$OSTYPE" == "darwin"*) ]]; then
   # If arm64 AND darwin (macOS)
   export ARCH=arm64
   export MACOSX_DEPLOYMENT_TARGET=11.0
-  MACOS_M1=true
+  export CXX=$(which clang++)
+  MACOS_SILICON=true
+  echo "Apple Silicon detected."
+
+  # get macos version
+  MACOS_VERSION=$(sw_vers -productVersion)
+  echo "macOS Version: $MACOS_VERSION"
+
+  #check if clang++ is installed and print version. Otherwise exit with an error message
+  if command_exists "clang++"; then
+    echo "clang++ is installed. Version: $(clang++ --version | head -n 1)"
+  else
+    echo "clang++ is not installed. Please install Xcode."
+    exit 1
+  fi
 fi
 
 # Speed up the process
@@ -53,7 +76,7 @@ make_dir() {
 
 remove_dir() {
   if [ -d "$1" ]; then
-    rm -r "$1"
+    rm -rf "$1"
   fi
 }
 
@@ -120,7 +143,16 @@ download() {
   )
 }
 
+print_flags () {
+  echo "Flags: CFLAGS \"$CFLAGS\", CXXFLAGS \"$CXXFLAGS\", LDFLAGS \"$LDFLAGS\", LDEXEFLAGS \"$LDEXEFLAGS\""
+}
+
 execute() {
+
+  if [[ "$1" == *configure* ]]; then
+    print_flags
+  fi
+
   echo "$ $*"
 
   OUTPUT=$("$@" 2>&1)
@@ -156,14 +188,6 @@ build() {
   return 0
 }
 
-command_exists() {
-  if ! [[ -x $(command -v "$1") ]]; then
-    return 1
-  fi
-
-  return 0
-}
-
 library_exists() {
   if ! [[ -x $(pkg-config --exists --print-errors "$1" 2>&1 >/dev/null) ]]; then
     return 1
@@ -185,7 +209,7 @@ verify_binary_type() {
   echo ""
   case $BINARY_TYPE in
   "Mach-O 64-bit executable arm64")
-    echo "Successfully built Apple Silicon (M1) for ${OSTYPE}: ${BINARY_TYPE}"
+    echo "Successfully built Apple Silicon for ${OSTYPE}: ${BINARY_TYPE}"
     ;;
   *)
     echo "Successfully built binary for ${OSTYPE}: ${BINARY_TYPE}"
@@ -251,7 +275,9 @@ while (($# > 0)); do
         echo "Error: A full static binary can only be build on Linux."
         exit 1
       fi
-      LDEXEFLAGS="-static"
+      LDEXEFLAGS="-static -fPIC"
+      CFLAGS+=" -fPIC"
+      CXXFLAGS+=" -fPIC"
     fi
     if [[ "$1" == "--latest" ]]; then
       LATEST=true
@@ -339,8 +365,8 @@ fi
 if build "pkg-config" "0.29.2"; then
   download "https://pkgconfig.freedesktop.org/releases/pkg-config-$CURRENT_PACKAGE_VERSION.tar.gz"
   if [[ "$OSTYPE" == "darwin"* ]]; then
-  	export XXFLAGS="-Wno-int-conversion" # pkg-config 0.29.2 has a warning that is treated as an error
-  	export CFLAGS="-Wno-error=int-conversion"
+  	export XXFLAGS +=" -Wno-int-conversion" # pkg-config 0.29.2 has a warning that is treated as an error
+  	export CFLAGS +=" -Wno-error=int-conversion"
   fi
   execute ./configure --silent --prefix="${WORKSPACE}" --with-pc-path="${WORKSPACE}"/lib/pkgconfig --with-internal-glib
   execute make -j $MJOBS
@@ -380,7 +406,7 @@ if build "m4" "1.4.19"; then
   build_done "m4" $CURRENT_PACKAGE_VERSION
 fi
 
-if build "autoconf" "2.71"; then
+if build "autoconf" "2.72"; then
   download "https://ftp.gnu.org/gnu/autoconf/autoconf-$CURRENT_PACKAGE_VERSION.tar.gz"
   execute ./configure --prefix="${WORKSPACE}"
   execute make -j $MJOBS
@@ -388,7 +414,7 @@ if build "autoconf" "2.71"; then
   build_done "autoconf" $CURRENT_PACKAGE_VERSION
 fi
 
-if build "automake" "1.16.5"; then
+if build "automake" "1.17"; then
   download "https://ftp.gnu.org/gnu/automake/automake-$CURRENT_PACKAGE_VERSION.tar.gz"
   execute ./configure --prefix="${WORKSPACE}"
   execute make -j $MJOBS
@@ -415,7 +441,7 @@ if $NONFREE_AND_GPL; then
 
   if build "openssl" "1.1.1w"; then
     download "https://www.openssl.org/source/openssl-$CURRENT_PACKAGE_VERSION.tar.gz"
-    if $MACOS_M1; then
+    if $MACOS_SILICON; then
       sed -n 's/\(##### GNU Hurd\)/"darwin64-arm64-cc" => { \n    inherit_from     => [ "darwin-common", asm("aarch64_asm") ],\n    CFLAGS           => add("-Wall"),\n    cflags           => add("-arch arm64 "),\n    lib_cppflags     => add("-DL_ENDIAN"),\n    bn_ops           => "SIXTY_FOUR_BIT_LONG", \n    perlasm_scheme   => "macosx", \n}, \n\1/g' Configurations/10-main.conf
       execute ./Configure --prefix="${WORKSPACE}" no-shared no-asm darwin64-arm64-cc
     else
@@ -435,7 +461,7 @@ else
     build_done "gmp" $CURRENT_PACKAGE_VERSION
   fi
 
-  if build "nettle" "3.9.1"; then
+  if build "nettle" "3.10"; then
     download "https://ftp.gnu.org/gnu/nettle/nettle-$CURRENT_PACKAGE_VERSION.tar.gz"
     execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static --disable-openssl --disable-documentation --libdir="${WORKSPACE}"/lib CPPFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}"
     execute make -j $MJOBS
@@ -444,8 +470,8 @@ else
   fi
 
   if [[ ! $ARCH == 'arm64' ]]; then
-    if build "gnutls" "3.7.10"; then
-      download "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.7/gnutls-$CURRENT_PACKAGE_VERSION.tar.xz"
+    if build "gnutls" "3.8.4"; then
+      download "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-$CURRENT_PACKAGE_VERSION.tar.xz"
       execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static --disable-doc --disable-tools --disable-cxx --disable-tests --disable-gtk-doc-html --disable-libdane --disable-nls --enable-local-libopts --disable-guile --with-included-libtasn1 --with-included-unistring --without-p11-kit CPPFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}"
       execute make -j $MJOBS
       execute make install
@@ -455,12 +481,15 @@ else
   fi
 fi
 
-if build "cmake" "3.27.7"; then
+if build "cmake" "3.31.0"; then
+  CXXFLAGS_BACKUP=$CXXFLAGS
+  export CXXFLAGS+=" -std=c++11"
   download "https://github.com/Kitware/CMake/releases/download/v$CURRENT_PACKAGE_VERSION/cmake-$CURRENT_PACKAGE_VERSION.tar.gz"
   execute ./configure --prefix="${WORKSPACE}" --parallel="${MJOBS}" -- -DCMAKE_USE_OPENSSL=OFF
   execute make -j $MJOBS
   execute make install
   build_done "cmake" $CURRENT_PACKAGE_VERSION
+  export CXXFLAGS=$CXXFLAGS_BACKUP
 fi
 
 ##
@@ -497,12 +526,12 @@ if command_exists "python3"; then
 
   fi
   if command_exists "meson"; then
-    if build "dav1d" "1.4.2"; then
+    if build "dav1d" "1.5.0"; then
       download "https://code.videolan.org/videolan/dav1d/-/archive/$CURRENT_PACKAGE_VERSION/dav1d-$CURRENT_PACKAGE_VERSION.tar.gz"
       make_dir build
 
       CFLAGSBACKUP=$CFLAGS
-      if $MACOS_M1; then
+      if $MACOS_SILICON; then
         export CFLAGS="-arch arm64"
       fi
 
@@ -510,7 +539,7 @@ if command_exists "python3"; then
       execute ninja -C build
       execute ninja -C build install
 
-      if $MACOS_M1; then
+      if $MACOS_SILICON; then
         export CFLAGS=$CFLAGSBACKUP
       fi
 
@@ -520,7 +549,7 @@ if command_exists "python3"; then
   fi
 fi
 
-if build "svtav1" "2.1.0"; then
+if build "svtav1" "2.3.0"; then
   # Last known working commit which passed CI Tests from HEAD branch
   download "https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v$CURRENT_PACKAGE_VERSION/SVT-AV1-v$CURRENT_PACKAGE_VERSION.tar.gz" "svtav1-$CURRENT_PACKAGE_VERSION.tar.gz"
   cd "${PACKAGES}"/svtav1-$CURRENT_PACKAGE_VERSION//Build/linux || exit
@@ -528,7 +557,6 @@ if build "svtav1" "2.1.0"; then
   execute make -j $MJOBS
   execute make install
   execute cp SvtAv1Enc.pc "${WORKSPACE}/lib/pkgconfig/"
-  execute cp SvtAv1Dec.pc "${WORKSPACE}/lib/pkgconfig/"
   build_done "svtav1" $CURRENT_PACKAGE_VERSION
 fi
 CONFIGURE_OPTIONS+=("--enable-libsvtav1")
@@ -537,10 +565,11 @@ CONFIGURE_OPTIONS+=("--enable-libsvtav1")
 if command_exists "cargo"; then
   if [[ ! "$SKIPRAV1E" == "yes" ]]; then
     if build "rav1e" "0.7.1"; then
+      echo "if you get the message 'cannot be built because it requires rustc x.xx or newer, try to run 'rustup update'"
       execute cargo install cargo-c
       download "https://github.com/xiph/rav1e/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz"
       export RUSTFLAGS="-C target-cpu=native"  
-      execute cargo cinstall --prefix="${WORKSPACE}" --library-type=staticlib --crt-static --release
+      execute cargo cinstall --prefix="${WORKSPACE}" --libdir=lib --library-type=staticlib --crt-static --release
       build_done "rav1e" $CURRENT_PACKAGE_VERSION
     fi
     CONFIGURE_OPTIONS+=("--enable-librav1e")
@@ -569,7 +598,7 @@ if $NONFREE_AND_GPL; then
 fi
 
 if $NONFREE_AND_GPL; then
-  if build "x265" "3.6"; then
+  if build "x265" "4.0"; then
     download "https://bitbucket.org/multicoreware/x265_git/downloads/x265_$CURRENT_PACKAGE_VERSION.tar.gz" "x265-$CURRENT_PACKAGE_VERSION.tar.gz" # This is actually 3.4 if looking at x265Version.txt
     cd build/linux || exit
     rm -rf 8bit 10bit 12bit 2>/dev/null
@@ -612,7 +641,7 @@ EOF
   CONFIGURE_OPTIONS+=("--enable-libx265")
 fi
 
-if build "libvpx" "1.14.1"; then
+if build "libvpx" "1.15.0"; then
   download "https://github.com/webmproject/libvpx/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz" "libvpx-$CURRENT_PACKAGE_VERSION.tar.gz"
 
   if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -654,7 +683,7 @@ if $NONFREE_AND_GPL; then
   if build "vid_stab" "1.1.1"; then
     download "https://github.com/georgmartius/vid.stab/archive/v$CURRENT_PACKAGE_VERSION.tar.gz" "vid.stab-$CURRENT_PACKAGE_VERSION.tar.gz"
 
-    if $MACOS_M1; then
+    if $MACOS_SILICON; then
       curl -L --silent -o "$PACKAGES/vid.stab-$CURRENT_PACKAGE_VERSION/fix_cmake_quoting.patch" "https://raw.githubusercontent.com/Homebrew/formula-patches/5bf1a0e0cfe666ee410305cece9c9c755641bfdf/libvidstab/fix_cmake_quoting.patch"
       patch -p1 <fix_cmake_quoting.patch
     fi
@@ -668,12 +697,12 @@ if $NONFREE_AND_GPL; then
   CONFIGURE_OPTIONS+=("--enable-libvidstab")
 fi
 
-if build "av1" "42dfaa1d47022650bc157dbe20d210591d14bae4"; then
-  # libaom 42dfaa1d47022650bc157dbe20d210591d14bae4 == v3.9.0
+if build "av1" "d6f30ae474dd6c358f26de0a0fc26a0d7340a84c"; then
+  #  d6f30ae474dd6c358f26de0a0fc26a0d7340a84c == v3.11.0
   download "https://aomedia.googlesource.com/aom/+archive/$CURRENT_PACKAGE_VERSION.tar.gz" "av1.tar.gz" "av1"
   make_dir "$PACKAGES"/aom_build
   cd "$PACKAGES"/aom_build || exit
-  if $MACOS_M1; then
+  if $MACOS_SILICON; then
     execute cmake -DENABLE_TESTS=0 -DENABLE_EXAMPLES=0 -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCONFIG_RUNTIME_CPU_DETECT=0 "$PACKAGES"/av1
   else
     execute cmake -DENABLE_TESTS=0 -DENABLE_EXAMPLES=0 -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib "$PACKAGES"/av1
@@ -818,7 +847,7 @@ if build "libtheora" "1.1.1"; then
   chmod +x configure.patched
   mv configure.patched configure
 
-  if ! $MACOS_M1; then
+  if ! $MACOS_SILICON; then
     ##BEGIN CONFIG.GUESS PATCH -- Updating config.guess file. Which allowed me to compile on aarch64 (ARMv8) [linux kernel 4.9 Ubuntu 20.04]
     rm config.guess
     curl -L --silent -o "config.guess" "https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.guess"
@@ -850,14 +879,14 @@ fi
 ## image library
 ##
 
-if build "libtiff" "4.6.0"; then
+if build "libtiff" "4.7.0"; then
   download "https://download.osgeo.org/libtiff/tiff-$CURRENT_PACKAGE_VERSION.tar.xz"
   execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static --disable-dependency-tracking --disable-lzma --disable-webp --disable-zstd --without-x
   execute make -j $MJOBS
   execute make install
   build_done "libtiff" $CURRENT_PACKAGE_VERSION
 fi
-if build "libpng" "1.6.43"; then
+if build "libpng" "1.6.44"; then
   download "https://sourceforge.net/projects/libpng/files/libpng16/$CURRENT_PACKAGE_VERSION/libpng-$CURRENT_PACKAGE_VERSION.tar.gz" "libpng-$CURRENT_PACKAGE_VERSION.tar.gz"
   export LDFLAGS="${LDFLAGS}"
   export CPPFLAGS="${CFLAGS}"
@@ -867,7 +896,7 @@ if build "libpng" "1.6.43"; then
   build_done "libpng" $CURRENT_PACKAGE_VERSION
 fi
 
-if build "libjxl" "0.10.3"; then
+if build "libjxl" "0.11.0"; then
   download "https://github.com/libjxl/libjxl/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz" "libjxl-$CURRENT_PACKAGE_VERSION.tar.gz"
 # currently needed to fix linking of static builds in non-C++ applications
   sed "s/-ljxl_threads/-ljxl_threads @JPEGXL_THREADS_PUBLIC_LIBS@/g" lib/threads/libjxl_threads.pc.in >lib/threads/libjxl_threads.pc.in.patched
@@ -877,7 +906,7 @@ if build "libjxl" "0.10.3"; then
   rm lib/jxl_threads.cmake
   mv lib/jxl_threads.cmake.patched lib/jxl_threads.cmake
   execute ./deps.sh
-  execute cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=off -DENABLE_STATIC=ON -DCMAKE_BUILD_TYPE=Release -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=OFF -DJPEGXL_ENABLE_JPEGLI=OFF -DJPEGXL_TEST_TOOLS=OFF -DJPEGXL_ENABLE_JNI=OFF -DBUILD_TESTING=OFF .
+  execute cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=off -DENABLE_STATIC=ON -DCMAKE_BUILD_TYPE=Release -DJPEGXL_ENABLE_BENCHMARK=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=OFF -DJPEGXL_ENABLE_JPEGLI=ON -DJPEGXL_TEST_TOOLS=OFF -DJPEGXL_ENABLE_JNI=OFF -DBUILD_TESTING=OFF DJPEGXL_ENABLE_SKCMS=OFF .
   execute make -j $MJOBS
   execute make install
   build_done "libjxl" $CURRENT_PACKAGE_VERSION
@@ -911,7 +940,7 @@ if build "libsdl" "2.30.1"; then
   build_done "libsdl" $CURRENT_PACKAGE_VERSION
 fi
 
-if build "FreeType2" "2.13.2"; then
+if build "FreeType2" "2.13.3"; then
   download "https://downloads.sourceforge.net/freetype/freetype-$CURRENT_PACKAGE_VERSION.tar.xz"
   execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static
   execute make -j $MJOBS
@@ -922,7 +951,7 @@ fi
 CONFIGURE_OPTIONS+=("--enable-libfreetype")
 
 if $NONFREE_AND_GPL; then
-  if build "srt" "1.5.3"; then
+  if build "srt" "1.5.4"; then
     download "https://github.com/Haivision/srt/archive/v$CURRENT_PACKAGE_VERSION.tar.gz" "srt-$CURRENT_PACKAGE_VERSION.tar.gz"
     export OPENSSL_ROOT_DIR="${WORKSPACE}"
     export OPENSSL_LIB_DIR="${WORKSPACE}"/lib
@@ -1009,7 +1038,7 @@ if [[ "$OSTYPE" == "linux-gnu" ]]; then
     fi
   fi
 
-  if build "amf" "1.4.33"; then
+  if build "amf" "1.4.35"; then
     download "https://github.com/GPUOpen-LibrariesAndSDKs/AMF/archive/refs/tags/v$CURRENT_PACKAGE_VERSION.tar.gz" "AMF-$CURRENT_PACKAGE_VERSION.tar.gz" "AMF-$CURRENT_PACKAGE_VERSION"
     execute rm -rf "${WORKSPACE}/include/AMF"
     execute mkdir -p "${WORKSPACE}/include/AMF"
@@ -1037,7 +1066,7 @@ fi
 build "ffmpeg" "$FFMPEG_VERSION"
 download "https://github.com/FFmpeg/FFmpeg/archive/refs/heads/release/$FFMPEG_VERSION.tar.gz" "FFmpeg-release-$FFMPEG_VERSION.tar.gz"
 # shellcheck disable=SC2086
-./configure "${CONFIGURE_OPTIONS[@]}" \
+execute ./configure "${CONFIGURE_OPTIONS[@]}" \
   --disable-debug \
   --disable-shared \
   --enable-pthreads \
